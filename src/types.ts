@@ -514,8 +514,32 @@ export type TrainTimetable = TrainTimetableEntry[];
 
 /** Response from the `/timetable` endpoint, the timetable for a single day. */
 export interface DayTimetable {
-    /** Description of the timetable referenced. You can use this to determine how up-to-date it is. */
+    /**
+     * A unique identifier for the timetable referenced.
+     * Usually, this is the name of the zip file provided by Nexus starting with DEP.
+     *  However, where the zip file provided had a generic name, this may be chosen by the host of this proxy.
+     */
+    ref: string;
+    /** The service ID for the timetable referenced. */
+    serviceId: number;
+    /** Description of the base timetable referenced. */
     description: string;
+    /**
+     * The date this timetable claims to be effective from, usually in DD-Mmm-YYYY format.
+     * This is not used to select the timetable since other timetables can take precedence.
+     */
+    effectiveFrom: string;
+    /**
+     * The date this timetable claims to be effective to, usually in DD-Mmm-YYYY format.
+     * This is not used to select the timetable since other timetables can take precedence.
+     */
+    effectiveTo: string;
+    /**
+     * A bitmask representing the dates between effectiveFrom and effectiveTo (inclusive)
+     *  that this timetable claims to be effective on.
+     * This is not used to select the timetable since other timetables can take precedence.
+     */
+    bitmask: BigInt;
     /** Map of train running numbers (TRNs, without the leading "T", e.g. "101") to their timetables. */
     trains: Record<string, TrainTimetable>;
 }
@@ -582,9 +606,7 @@ export type NewTrainsHistoryPayload<Options extends TrainsHistoryStreamOptions =
     FilteredByProps<FullNewTrainsHistoryPayload<Options>, Options, "tableProps">;
 
 /** Payload from the `new-train-history` event. */
-export type NewTrainHistoryPayload = StreamPayload & (
-    Omit<TrainHistoryEntry, "date"> | never
-);
+export type NewTrainHistoryPayload = StreamPayload & (TrainHistoryEntry | never);
 
 /** Payload from the `heartbeat-error` event. */
 export type HeartbeatErrorPayload<Options extends { apis?: string[] } = {}> =

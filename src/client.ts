@@ -317,7 +317,9 @@ export class MetroApiClient {
             }
         }
         const response = await fetch(`${this.baseUrl}/timetable?${queryParams}`);
-        return response.json();
+        const data = await response.json();
+        data.bitmask = BigInt('0x' + data.bitmask);
+        return data;
     }
 
     /**

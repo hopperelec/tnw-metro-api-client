@@ -1,3 +1,57 @@
+// --- Utility Types ---
+
+// Flattens intersection types, so editors show a single object
+type Prettify<T> = { [K in keyof T]: T[K] } & {};
+
+/**
+ * The values given for an array option, or `Default` if it wasn't given.
+ * An empty array also gives `Default`, since empty filters match everything.
+ * Specific values are only known if the array was written inline, rather than being a variable of a general type.
+ */
+type ArrayOptionValues<Options, Key extends PropertyKey, Default> =
+    Key extends keyof Options
+        ? Options[Key] extends readonly (infer Value extends Default)[]
+            ? [Value] extends [never] ? Default : Value
+            : Default
+        : Default;
+
+/** Whether `Value` is definitely one of the elements of the tuple `Values` */
+type DefinitelyIncludes<Values extends readonly unknown[], Value> =
+    Values extends readonly [infer First, ...infer Rest]
+        ? [First] extends [Value] ? true : DefinitelyIncludes<Rest, Value>
+        : false;
+
+/**
+ * Whether a value is definitely, possibly or not included by an array option,
+ *  where an empty or missing array includes everything.
+ */
+type ArrayOptionIncludes<Options, Key extends PropertyKey, Value> =
+    Key extends keyof Options
+        // If the option is optional, it's unknown whether it was given
+        ? {} extends Pick<Options, Key>
+            ? "possibly"
+            : Options[Key] extends infer Values extends readonly unknown[]
+                ? Values extends readonly []
+                    ? "included"
+                    : DefinitelyIncludes<Values, Value> extends true
+                        ? "included"
+                        : Value extends Values[number] ? "possibly" : "excluded"
+                : "included"
+        : "included";
+
+/** `Properties` if they are definitely included, partial if they are possibly included, or nothing otherwise */
+type IncludedProperties<Inclusion, Properties> =
+    Inclusion extends "included" ? Properties
+    : Inclusion extends "possibly" ? Partial<Properties>
+    : {};
+
+/**
+ * A record of the keys which were filtered for.
+ * If specific keys were filtered for, they are each optional, since there may not be any data for them.
+ */
+type FilteredRecord<Key extends string, Value> =
+    string extends Key ? Record<Key, Value> : Prettify<Partial<Record<Key, Value>>>;
+
 // --- Filtering ---
 
 /**
@@ -32,7 +86,36 @@ export type TimeFilter =
     | { to: Date; }
     | { from: Date; to: Date; };
 
+/** Options for filtering trains by their statuses. Each filter matches any of its values. */
+export interface TrainStatusFilters {
+    /**
+     * Only include trains with these TRNs.
+     * If none are specified, all trains are included.
+     */
+    trns?: readonly Trn[];
+    /**
+     * Only include statuses where the last event is of one of these types (e.g., `"ARRIVED"`).
+     * If none are specified, all event types are included.
+     */
+    eventTypes?: readonly string[];
+    /**
+     * Only include statuses where the last event was at one of these locations, in the format
+     *  `<station code>_<platform number>` (e.g., `"MTW_4"`), or just a station code for all platforms at a station.
+     * If none are specified, all locations are included.
+     */
+    locations?: readonly TimetabledLocation[];
+    /**
+     * Only include statuses with one of these destinations (e.g., `"South Hylton"` or `"Not In Service"`).
+     * For the Times API, this is the first planned destination.
+     * If none are specified, all destinations are included.
+     */
+    destinations?: readonly string[];
+}
+
 // --- Underlying API Related Types ---
+
+/** A train running number (TRN) without the leading "T" (e.g., `"101"`). */
+export type Trn = string;
 
 /**
  * An identifier for a location a train can be timetabled to be.
@@ -47,9 +130,26 @@ export type TimetabledLocation = string;
  * A unique identifier for a platform.
  * This is usually in the format `<station code>;<platform number>` (e.g., `"MTW;4"`).
  * However, the proxy does not check if this is in the expected format,
- * so you should do your own checks if you need to parse this
+ *  so you should do your own checks if you need to parse this.
  */
 export type PlatformCode = string;
+
+/** Valid platform numbers. */
+export type PlatformNumber = 1 | 2 | 3 | 4;
+
+/** An API which the proxy can get train data from. */
+export type TrainDataApi = "TIMES" | "GEO";
+
+/** An API which the proxy can record errors and warnings for. */
+export type ApiType = TrainDataApi | "GATEWAY";
+
+/** When a heartbeat (the proxy polling the APIs) started and ended. */
+export interface HeartbeatTimes {
+    /** When the heartbeat started. */
+    startedAt: Date;
+    /** When the heartbeat ended, or null if it is still ongoing or was interrupted. */
+    endedAt: Date | null;
+}
 
 /** When a train is expected to arrive at a platform. */
 export interface DueTime {
@@ -61,25 +161,32 @@ export interface DueTime {
     actualPredictedTime: Date;
 }
 
+/** A platform at a station. */
+export interface ParsedPlatform {
+    /** The name of the station (e.g., `"Monument"`). */
+    station: string;
+    /** The platform number. */
+    platformNumber: number;
+}
+
 /** Information about a train derived from the Times API. */
 export interface TimesApiData {
-    /** Last event for the train. */
+    /** The last event for the train. */
     lastEvent: {
-        /** Type of the last event (e.g., `"APPROACHING"`, `"ARRIVED"`). */
+        /** The type of the last event (e.g., `"APPROACHING"`, `"ARRIVED"`). */
         type: string;
         /**
-         * A human-readable representation of the station and platform where the last event occurred.
-         * This is usually in the format "`<station name> Platform <platform number>`".
-         * However, the proxy does not check if this is in the expected format,
-         * so you should do your own checks if you need to parse this.
+         * Where the last event occurred.
+         * This is only a string if it isn't in the expected format,
+         *  in which case it is exactly as provided by the upstream API.
          */
-        location: string;
-        /** Time of the last event. */
+        location: ParsedPlatform | string;
+        /** The time of the last event. */
         time: Date;
     };
-    /** List of planned destinations, in order. */
+    /** List of planned destinations for the train, in order of when they are expected to become the current destination. */
     plannedDestinations: {
-        /** Name of the destination station. */
+        /** The name of the destination station. */
         name: string;
         /** When and where this is expected to become the current destination. */
         from: {
@@ -89,7 +196,7 @@ export interface TimesApiData {
             time: Date;
         }
     }[];
-    /** List of next platforms, in order of planned arrival. */
+    /** List of next platforms for the train, in order of planned arrival. */
     nextPlatforms: {
         /** The code of the platform. */
         code: PlatformCode
@@ -98,94 +205,57 @@ export interface TimesApiData {
     }[];
 }
 
-/** Information about a train derived from the Train Statuses API. */
-export interface TrainStatusesApiData {
-    /** Name of the destination. */
+/** A type of event in a last seen message from the Geo API. */
+export type GeoApiEventType = "APPROACHING" | "ARRIVED" | "READY_TO_START" | "DEPARTED";
+
+export interface ParsedGeoApiLastSeen extends ParsedPlatform {
+    /** Type of the last seen event. */
+    type: GeoApiEventType;
+    /** When the last seen event occurred. */
+    time: Date;
+}
+
+/** Information about a train derived from the Geo API. */
+export interface GeoApiData {
+    /** The name of the train's current destination. */
     destination: string;
     /**
-     * Last seen status of the train, in the format used on the Pop app's embedded map.
-     * The proxy does not check if this is in the expected format,
-     * so you should do your own checks if you need to parse this.
+     * When and where the train was last seen.
+     * This is only a string if it isn't in the expected format,
+     *  in which case it is exactly as provided by the upstream API.
      */
-    lastSeen: string;
+    lastSeen: ParsedGeoApiLastSeen | string;
 }
 
 /** Collated train data from one or both APIs. */
 export type CollatedTrain =
-    | { timesAPI: TimesApiData; trainStatusesAPI?: TrainStatusesApiData }
-    | { timesAPI?: TimesApiData; trainStatusesAPI: TrainStatusesApiData };
+    | { timesAPI: TimesApiData; geoAPI?: GeoApiData }
+    | { timesAPI?: TimesApiData; geoAPI: GeoApiData };
 
-// --- History ---
-
-export interface BaseHistoryEntry {
-    /** Time of the heartbeat that created this history entry. */
-    date: Date;
-}
-
-/** Summary of a train's history. */
-export interface HistorySummary {
-    /** Number of history entries available. */
-    numEntries: number;
-    /** When the first entry was made. */
-    firstEntry: Date;
-    /** When the last entry was made. */
-    lastEntry: Date;
-}
-
-// --- Train History ---
-
-/** The status of a train in the history. Notably omits nextPlatforms from TimesApiData. */
-export type ActiveTrainHistoryStatus =
-    | { timesAPI: Omit<TimesApiData, "nextPlatforms">; trainStatusesAPI?: TrainStatusesApiData }
-    | { timesAPI?: Omit<TimesApiData, "nextPlatforms">; trainStatusesAPI: TrainStatusesApiData }
-
-/** Base interface for a single entry in a train's history. */
-export interface BaseTrainHistoryEntry extends BaseHistoryEntry {
-    /** Whether the train was active at this time. */
-    active: boolean;
-}
-
-/** A single entry in a train's history when the train is inactive. */
-export interface InactiveTrainHistoryEntry extends BaseTrainHistoryEntry {
-    active: false;
-}
-
-/** A single entry in a train's history when the train is active. */
-export interface ActiveTrainHistoryEntry extends BaseTrainHistoryEntry {
-    active: true;
-    /** The train's status at this time */
-    status: ActiveTrainHistoryStatus;
-}
-
-/** A single entry in a train's history. */
-export type TrainHistoryEntry = ActiveTrainHistoryEntry | InactiveTrainHistoryEntry;
+/** Times API data as stored in the history, which omits `nextPlatforms`. */
+export type HistoricTimesApiData = Omit<TimesApiData, "nextPlatforms">;
 
 // --- Heartbeat Errors and Warnings ---
 
-/** A single entry in the heartbeat errors history. */
-export interface HeartbeatErrorEntry extends BaseHistoryEntry {
+/** An error that occurred during a heartbeat. */
+export interface HeartbeatError<Api extends ApiType = ApiType> {
     /** Identifier of the API that produced the error. */
-    api: string;
-    /** String containing the error message. */
+    api: Api;
+    /** The error message. */
     message: string;
+    /** The heartbeat during which the error occurred. */
+    heartbeat: HeartbeatTimes;
 }
 
-/** A single entry in the heartbeat warnings history. */
-export interface HeartbeatWarningsEntry extends BaseHistoryEntry {
-    /** Identifier of the API that produced the warning. */
-    api: string;
-    /**
-     * The specific warning data.
-     * The structure will vary depending on the API that produced the warning.
-     * See: https://gist.github.com/hopperelec/c23eb872b83b5584122e61a676394ff3#apis
-     */
-    warnings: any;
+/** A warning generated during a heartbeat. */
+export interface HeartbeatWarning<Api extends ApiType = ApiType> {
+    /** Identifier of the API that produced the warning(s). */
+    api: Api;
+    /** The structure of this object depends on the API that produced the warning. */
+    data: any;
+    /** The heartbeat during which the warning was generated. */
+    heartbeat: HeartbeatTimes;
 }
-
-type FilteredByAPI<
-    Entry extends { api: string },
-    Options extends { apis?: string[] }
-> = Entry & { api: Options extends { apis: string[] } ? Options["apis"][number] : string };
 
 // --- `/constants` Endpoint ---
 
@@ -194,31 +264,35 @@ export interface ApiConstants<
     LocationAbbreviations extends Record<string, string> = Record<string, string>,
     Lines extends Record<string, (keyof LocationAbbreviations)[]> = Record<string, (keyof LocationAbbreviations)[]>,
 > {
-    /** Hour at which the timetable resets to the next day (0-23). */
+    /** The hour at which the timetable resets to the next day (0-23). */
     NEW_DAY_HOUR: number;
-    /** Interval at which history is always updated */
+
+    /** The interval, in milliseconds, at which heartbeats always happen. */
     PASSIVE_REFRESH_INTERVAL: number;
-    /** Minimum time between updates to the history, such as when a request is made for a train's current status */
+    /** The minimum time, in milliseconds, between heartbeats, such as when a request is made for a train's current status. */
     ACTIVE_REFRESH_MINIMUM_TIMEOUT: number;
-    /** Maximum number of train history entries kept, per train, before old entries are purged */
-    MAX_TRAIN_HISTORY_LENGTH: number;
-    /** Maximum number of heartbeat errors kept before old ones are purged */
-    MAX_HEARTBEAT_ERRORS_LENGTH: number;
-    /** Maximum number of heartbeat warnings kept before old ones are purged */
-    MAX_HEARTBEAT_WARNINGS_LENGTH: number;
-    /** Maximum age of history entries, in milliseconds, before being purged */
-    MAX_HISTORY_AGE: number;
-    /** Maximum number of history entries (limit) returned by `/history/train/:trn` */
+
+    /** The maximum number of history entries (limit) returned by train history endpoints. */
     MAX_HISTORY_REQUEST_LIMIT: number;
-    /** Default number of history entries (limit) returned by `/history/train/:trn` if no limit is specified */
+    /** The default number of history entries (limit) returned by train history endpoints if no limit is specified. */
     DEFAULT_HISTORY_REQUEST_LIMIT: number;
-    /** List of location abbreviations that refer to valid passenger stops (ie, not depots, sidings, vents, etc.) */
+
+    /** The maximum number of subscription tokens which can exist at a time for each IP address. */
+    MAX_SUBSCRIPTION_TOKENS_PER_IP: number;
+    /** The maximum number of subscriptions each subscription token can have. */
+    MAX_SUBSCRIPTIONS_PER_TOKEN: number;
+    /** The maximum number of streams which can be connected for each subscription token. Connecting more closes the oldest. */
+    MAX_STREAMS_PER_TOKEN: number;
+    /** The maximum total number of values in the filters of each subscription (e.g., TRNs and destinations). */
+    MAX_SUBSCRIPTION_FILTER_VALUES: number;
+
+    /** A list of location abbreviations that refer to valid passenger stops (ie, not depots, sidings, vents, etc.) */
     PASSENGER_STOPS: (keyof LocationAbbreviations)[];
-    /** Map of lines and the stations on them */
+    /** A map of lines and the stations on them */
     LINES: Lines;
-    /** Map from location abbreviations to human-readable names */
+    /** A map from location abbreviations to human-readable names */
     LOCATION_ABBREVIATIONS: LocationAbbreviations;
-    /** Map from route codes to destinations */
+    /** A map from route codes to destinations */
     ROUTE_CODES: Record<number, TimetabledLocation>;
 }
 
@@ -229,14 +303,14 @@ export interface TrainsOptions extends FilterableProps {}
 
 /** Response from the `/trains` endpoint, assuming all properties are present. */
 export interface FullTrainsResponse {
-    /** Time of the last heartbeat */
-    lastChecked: Date;
-    /** List of all active trains */
-    trains: Record<string, {
-        /** The train's current status */
+    /** The last heartbeat. */
+    lastHeartbeat: HeartbeatTimes;
+    /** Map of TRNs to all active trains. */
+    trains: Record<Trn, {
+        /** The train's current status. */
         status: CollatedTrain;
-        /** When this train's status last changed */
-        lastChanged: Date;
+        /** The heartbeat during which this train's status last changed. */
+        statusLastChanged: HeartbeatTimes;
     }>;
 }
 
@@ -245,30 +319,30 @@ export type TrainsResponse<Options extends TrainsOptions> = FilteredByProps<Full
 
 // --- `/train/:trn` Endpoint ---
 
-/** Options for the `/train/:trn` endpoint */
+/** Options for the `/train/:trn` endpoint. */
 export interface TrainOptions extends FilterableProps {}
 
 /** Expected timetabled location for a train. */
 export interface ExpectedTrainState {
-    /** Event, relative to the expected location */
+    /** Event, relative to the expected location. */
     event: 'ARRIVED' | 'DEPARTED' | 'APPROACHING' | 'TERMINATED';
-    /** The location the train is expected to be */
+    /** The location the train is expected to be. */
     location: TimetabledLocation;
-    /** Whether the train is expected to be in passenger service */
+    /** Whether the train is expected to be in passenger service. */
     inService: boolean;
-    /** The location the train is expected to be heading to */
+    /** The location the train is expected to be heading to. */
     destination: string;
 }
 
-/** Base interface for `/train/:trn` endpoint response. */
+/** Response from the `/train/:trn` endpoint, assuming all properties are present. */
 export interface FullTrainResponse {
-    /** Time of the last heartbeat */
-    lastChecked: Date;
-    /** When this train's status last changed, or null if this train has not been seen recently */
-    lastChanged: Date | null;
-    /** Expected state of the train, or null if the train is not timetabled to be in service */
+    /** The last heartbeat. */
+    lastHeartbeat: HeartbeatTimes;
+    /** The heartbeat during which this train's status last changed, or null if no historic data is available for this train. */
+    statusLastChangedDuring: HeartbeatTimes | null;
+    /** The expected state of the train, or null if the train is not timetabled for today. */
     timetable: ExpectedTrainState | null;
-    /** The train's current status, if the train is currently active */
+    /** The train's current status, if the train is currently active. */
     status?: CollatedTrain;
 }
 
@@ -277,25 +351,25 @@ export type TrainResponse<Options extends TrainOptions> = FilteredByProps<FullTr
 
 // --- `/due-times` Endpoint ---
 
-/** Options for the `/due-times` endpoint */
+/** Options for the `/due-times` endpoint. */
 export interface DueTimesOptions extends FilterableProps {}
 
 /** Response from the `/due-times` endpoint, assuming all properties are present. */
 export interface FullDueTimesResponse {
-    /** Time of the last heartbeat */
-    lastChecked: Date;
+    /** The last heartbeat. */
+    lastHeartbeat: HeartbeatTimes;
     /**
-     * Map of platform codes to a list of the next trains due at that platform, in order of time.dueIn
+     * Map of platform codes to a list of the next trains due at that platform, in order of `time.dueIn`.
      *
      * Note that the same train can theoretically appear multiple times if:
      * - it is expected to turn around facing road
      * - it is running a very short shuttle service, which it is expected to lap within 100 minutes
      * - or, most likely, if the API is confused.
      */
-    dueTimes: Record<string, {
-        /** TRN of the train to arrive at the platform */
-        trn: string;
-        /** When that train is expected to arrive at the platform */
+    dueTimes: Record<PlatformCode, {
+        /** The TRN of the train to arrive at the platform. */
+        trn: Trn;
+        /** When that train is expected to arrive at the platform. */
         time: DueTime;
     }[]>;
 }
@@ -305,24 +379,21 @@ export type DueTimesResponse<Options extends DueTimesOptions> = FilteredByProps<
 
 // --- `/due-times/station/:station` Endpoint ---
 
-/** Options for the `/due-times/station/:station` endpoint */
+/** Options for the `/due-times/station/:station` endpoint. */
 export interface StationDueTimesOptions extends FilterableProps {}
+
+/** A train due at a station. */
+export interface StationDueTime extends PlatformDueTime {
+    /** The platform number. */
+    platform: PlatformNumber;
+}
 
 /** Response from the `/due-times/station/:station` endpoint, assuming all properties are present. */
 export interface FullStationDueTimesResponse {
-    /** Time of the last heartbeat */
-    lastChecked: Date;
-    /** The next trains due at this station, in order of time.dueIn */
-    dueTimes: {
-        /** The platform number */
-        platform: PlatformNumber;
-        /** TRN of the train to arrive at the platform */
-        trn: string;
-        /** When that train is expected to arrive at the platform */
-        time: DueTime;
-        /** The current status of the train */
-        status: CollatedTrain;
-    }[];
+    /** The last heartbeat. */
+    lastHeartbeat: HeartbeatTimes;
+    /** The next trains due at this station, in order of `time.dueIn`. */
+    dueTimes: StationDueTime[];
 }
 
 /** Response from the `/due-times/station/:station` endpoint. */
@@ -330,83 +401,146 @@ export type StationDueTimesResponse<Options extends StationDueTimesOptions> = Fi
 
 // --- `/due-times/platform/:platform` Endpoint ---
 
-/** Options for the `/due-times/platform/:platform` endpoint */
+/** Options for the `/due-times/platform/:platform` endpoint. */
 export interface PlatformDueTimesOptions extends FilterableProps {}
+
+/** A train due at a platform. */
+export interface PlatformDueTime {
+    /** The TRN of the train to arrive at the platform. */
+    trn: Trn;
+    /** When that train is expected to arrive at the platform. */
+    time: DueTime;
+    /** The current status of the train. */
+    status: CollatedTrain;
+}
 
 /** Response from the `/due-times/platform/:platform` endpoint, assuming all properties are present. */
 export interface FullPlatformDueTimesResponse {
-    /** Time of the last heartbeat */
-    lastChecked: Date;
-    /** The next trains due at this platform, in order of time.dueIn */
-    dueTimes: {
-        /** TRN of the train to arrive at the platform */
-        trn: string;
-        /** When that train is expected to arrive at the platform */
-        time: DueTime;
-        /** The current status of the train */
-        status: CollatedTrain;
-    }[];
+    /** The last heartbeat. */
+    lastHeartbeat: HeartbeatTimes;
+    /** The next trains due at this platform, in order of `time.dueIn`. */
+    dueTimes: PlatformDueTime[];
 }
 
 /** Response from the `/due-times/platform/:platform` endpoint. */
 export type PlatformDueTimesResponse<Options extends PlatformDueTimesOptions> = FilteredByProps<FullPlatformDueTimesResponse, Options>;
 
-// --- `/history` Endpoint ---
+// --- History ---
 
-export interface HistorySummaryResponse {
-    /** Time of the last heartbeat */
-    lastChecked: Date;
-    /** Map of train running numbers (TRNs, without the leading "T", e.g. "101") to their history summaries */
-    trains: Record<string, HistorySummary>;
-    /** History summary for the heartbeat errors */
-    heartbeatErrors: HistorySummary;
-    /** History summary for the heartbeat warnings */
-    heartbeatWarnings: HistorySummary;
-}
-
-// --- `/history/train/:trn` Endpoint
-
-/** Options for `/history/train/:trn` endpoint */
-export interface TrainHistoryOptions {
+/** Options for limiting history, by truncating the time window until the limit is satisfied. */
+export interface HistoryLimitOptions {
     /** Range of time to get the history for */
     time?: TimeFilter;
     /**
-     * Limit the number of results.
+     * Limit the total number of entries returned across all trains.
      * Check `/constants` for the default and maximum values.
+     * Results are ordered from `time.from` if specified, otherwise backwards from `time.to` (or now).
      */
     limit?: number;
-    /**
-     * Filter by active state.
-     * `true`: Only include entries where the train was active.
-     * `false`: Only include entries marking transitions between active/inactive.
-     * `undefined` (default): Include all entries.
-     */
-    active?: boolean;
-    /** Property filter string. */
-    props?: PropsFilter;
+    /** Limit the number of entries returned per train. */
+    limitPerTrn?: number;
 }
 
-/** Response from the `/history/train/:trn` endpoint, assuming all properties are present. */
-export interface FullTrainHistoryResponse {
-    /** Time of the last heartbeat */
-    lastChecked: Date;
-    /** A summary of the train's history. */
-    summary: HistorySummary;
-    /** The selected history entries. */
-    extract: TrainHistoryEntry[];
+/** A period during which a train's status (in one API) stayed the same. */
+export interface TrainHistoryEntry<Status> {
+    /** The heartbeat during which this status started. */
+    startHeartbeat: HeartbeatTimes;
+    /** The heartbeat during which this status ended, or null if it is still current. */
+    endHeartbeat: HeartbeatTimes | null;
+    /** The train's status during this period. */
+    status: Status;
 }
 
-export interface FullActiveTrainHistoryResponse extends FullTrainHistoryResponse {
-    extract: ActiveTrainHistoryEntry[];
+// --- `/history/trains` Endpoint ---
+
+/** Options for the `/history/trains` endpoint. */
+export interface TrainsHistoryOptions extends TrainStatusFilters, HistoryLimitOptions {
+    /** Which APIs to include history from. If none are specified, all APIs are included. */
+    apis?: readonly TrainDataApi[];
 }
 
-/** Response from the `/history/train/:trn` endpoint. */
-export type TrainHistoryResponse<Options extends TrainHistoryOptions> = FilteredByProps<
-    Options extends { active: true }
-        ? FullActiveTrainHistoryResponse
-        : FullTrainHistoryResponse,
-    Options
+/** A train's history from each API included by the options. */
+export type TrainHistory<Options extends TrainsHistoryOptions = {}> = Prettify<
+    IncludedProperties<ArrayOptionIncludes<Options, "apis", "TIMES">, {
+        /** History from the Times API, if included. */
+        timesAPI: TrainHistoryEntry<HistoricTimesApiData>[];
+    }> &
+    IncludedProperties<ArrayOptionIncludes<Options, "apis", "GEO">, {
+        /** History from the Geo API, if included. */
+        geoAPI: TrainHistoryEntry<GeoApiData>[];
+    }>
 >;
+
+/** Response from the `/history/trains` endpoint. */
+export interface TrainsHistoryResponse<Options extends TrainsHistoryOptions = {}> {
+    /** Map of TRNs to their history from each API, in the order requested (see `HistoryLimitOptions.limit`). */
+    trains: FilteredRecord<ArrayOptionValues<Options, "trns", Trn>, TrainHistory<Options>>;
+    /** If the results were truncated due to a limit being reached, the time they were truncated to. */
+    truncatedTo: Date | null;
+}
+
+// --- `/history/trains/availability` Endpoint ---
+
+/** Options for the `/history/trains/availability` endpoint. */
+export interface TrainsAvailabilityOptions extends HistoryLimitOptions {
+    /** Only include trains with these TRNs. If none are specified, all trains are included. */
+    trns?: readonly Trn[];
+    /** Which APIs to include availability for. If none are specified, all APIs are included. */
+    apis?: readonly TrainDataApi[];
+}
+
+/** A period during which a train was continuously active in an API. */
+export interface AvailabilityRange {
+    /** When the train became active. */
+    start: Date;
+    /** When the train stopped being active, if it isn't still active. */
+    end?: Date;
+}
+
+/** Response from the `/history/trains/availability` endpoint. */
+export interface TrainsAvailabilityResponse<Options extends TrainsAvailabilityOptions = {}> {
+    /** Map of TRNs to the periods during which they were active in each API. */
+    trains: FilteredRecord<
+        ArrayOptionValues<Options, "trns", Trn>,
+        // An API is only included if the train was active in it
+        Prettify<Partial<Record<ArrayOptionValues<Options, "apis", TrainDataApi>, AvailabilityRange[]>>>
+    >;
+    /** If the results were truncated due to a limit being reached, the time they were truncated to. */
+    truncatedTo: Date | null;
+}
+
+// --- `/history/snapshot` Endpoint ---
+
+/**
+ * How to find the heartbeat for a snapshot.
+ * - `"before"`: the heartbeat immediately before the time
+ * - `"after"`: the heartbeat immediately after the time
+ * - `"exact"`: the heartbeat in progress at the time
+ * - `"nearest"`: the heartbeat closest to the time
+ */
+export type SnapshotMatchStrategy = "before" | "after" | "exact" | "nearest";
+
+/** Options for the `/history/snapshot` endpoint. */
+export interface SnapshotOptions extends TrainStatusFilters {
+    /** How to find the heartbeat for the time. Defaults to `"before"`. */
+    matchStrategy?: SnapshotMatchStrategy;
+}
+
+/** Response from the `/history/snapshot` endpoint. */
+export interface SnapshotResponse<Options extends SnapshotOptions = {}> {
+    /** The heartbeat which the snapshot is of. */
+    heartbeat: HeartbeatTimes;
+    /** Map of TRNs to their data from the Times API during the heartbeat. */
+    timesApiTrains: FilteredRecord<ArrayOptionValues<Options, "trns", Trn>, HistoricTimesApiData>;
+    /** Map of TRNs to their data from the Geo API during the heartbeat. */
+    geoApiTrains: FilteredRecord<ArrayOptionValues<Options, "trns", Trn>, GeoApiData>;
+    /** Map of TRNs to the heartbeat during which their status last changed, as of the heartbeat. */
+    statusLastChanged: FilteredRecord<ArrayOptionValues<Options, "trns", Trn>, HeartbeatTimes>;
+    /** All errors that occurred during the heartbeat. */
+    errors: Omit<HeartbeatError, "heartbeat">[];
+    /** All warnings generated during the heartbeat. */
+    warnings: Omit<HeartbeatWarning, "heartbeat">[];
+}
 
 // --- `/history/heartbeat-errors` Endpoint ---
 
@@ -414,26 +548,22 @@ export type TrainHistoryResponse<Options extends TrainHistoryOptions> = Filtered
 export interface HeartbeatErrorsOptions {
     /** Whether to also receive warnings. */
     warnings?: boolean
-    /** Range of time to get the history for */
+    /** Range of time to get the history for. */
     time?: TimeFilter;
-    /**
-     * List of internal API identifiers to receive errors (and optionally warnings) for.
-     * See: https://gist.github.com/hopperelec/c23eb872b83b5584122e61a676394ff3#apis
-     */
-    apis?: string[];
+    /** Which APIs to get errors (and optionally warnings) for. If none are specified, all APIs are included. */
+    apis?: readonly ApiType[];
 }
 
+type FilteredByApi<Options extends { apis?: readonly ApiType[] }> = ArrayOptionValues<Options, "apis", ApiType>;
+
 /** Response from the `/history/heartbeat-errors` endpoint when warnings are not included. */
-export type HeartbeatErrorsResponseWithoutWarnings<
-    Options extends { apis?: string[] } = {}
-> = FilteredByAPI<HeartbeatErrorEntry, Options>[];
+export type HeartbeatErrorsResponseWithoutWarnings<Options extends { apis?: readonly ApiType[] } = {}> =
+    HeartbeatError<FilteredByApi<Options>>[];
 
 /** Response from the `/history/heartbeat-errors` endpoint when warnings are also included. */
-export type HeartbeatErrorsResponseWithWarnings<
-    Options extends { apis?: string[] } = {}
-> = {
-    errors: FilteredByAPI<HeartbeatErrorEntry, Options>[];
-    warnings: FilteredByAPI<HeartbeatWarningsEntry, Options>[];
+export type HeartbeatErrorsResponseWithWarnings<Options extends { apis?: readonly ApiType[] } = {}> = {
+    errors: HeartbeatError<FilteredByApi<Options>>[];
+    warnings: HeartbeatWarning<FilteredByApi<Options>>[];
 }
 
 export type HeartbeatErrorsResponse<Options extends HeartbeatErrorsOptions> =
@@ -474,13 +604,13 @@ export interface TimetableOptions {
      */
     limit?: number;
     /** Filter which TRNs to get the timetable for. Defaults to all timetabled TRNs. */
-    trns?: string[];
+    trns?: readonly Trn[];
     /** Filter the entries by type. Defaults to all types. */
-    types?: TimetableType[];
+    types?: readonly TimetableType[];
     /** Filter the entries by location. Defaults to all locations. */
-    locations?: TimetabledLocation[];
+    locations?: readonly TimetabledLocation[];
     /** Filter the entries by destination. Defaults to all destinations. */
-    destinations?: TimetabledLocation[];
+    destinations?: readonly TimetabledLocation[];
     /**
      * Filter the entries by whether the train is in passenger service.
      * Defaults to including both in-service and not in-service trains.
@@ -499,21 +629,33 @@ export interface TrainTimetableEntry {
     type: TimetableType;
     /** Where the train is timetabled to be at this time. */
     location: TimetabledLocation;
-    /** When this entry starts (i.e., when the train is expected to arrive at this location) */
-    arrivalTime: number;
-    /** When this entry ends (i.e., when the train is expected to depart from this location) */
-    departureTime: number;
+    /**
+     * When this entry starts (i.e., when the train is expected to arrive at this location).
+     * Missing if the train starts at this location, but at least one of this and `departureTime` is always present.
+     */
+    arrivalTime?: number;
+    /**
+     * When this entry ends (i.e., when the train is expected to depart from this location).
+     * Missing if the train terminates at this location, but at least one of this and `arrivalTime` is always present.
+     */
+    departureTime?: number;
     /** Whether the train is timetabled to be in passenger service at this time */
     inService: boolean;
     /** Where the train is timetabled to be headed at this time */
     destination: TimetabledLocation;
 }
 
+/** An entry in a train's timetable, which matches the types and passenger service filtered for. */
+type FilteredTrainTimetableEntry<Options extends TimetableOptions> = Prettify<TrainTimetableEntry & {
+    type: ArrayOptionValues<Options, "types", TimetableType>;
+    inService: Options extends { readonly inService: infer InService extends boolean } ? InService : boolean;
+}>;
+
 /** A list of entries in a train's timetable, ordered by time. */
-export type TrainTimetable = TrainTimetableEntry[];
+export type TrainTimetable<Options extends TimetableOptions = {}> = FilteredTrainTimetableEntry<Options>[];
 
 /** Response from the `/timetable` endpoint, the timetable for a single day. */
-export interface DayTimetable {
+export interface DayTimetable<Options extends TimetableOptions = {}> {
     /**
      * A unique identifier for the timetable referenced.
      * Usually, this is the name of the zip file provided by Nexus starting with DEP.
@@ -521,7 +663,7 @@ export interface DayTimetable {
      */
     ref: string;
     /** The service ID for the timetable referenced. */
-    serviceId: number;
+    serviceId: string;
     /** Description of the base timetable referenced. */
     description: string;
     /**
@@ -540,8 +682,116 @@ export interface DayTimetable {
      * This is not used to select the timetable since other timetables can take precedence.
      */
     bitmask: BigInt;
-    /** Map of train running numbers (TRNs, without the leading "T", e.g. "101") to their timetables. */
-    trains: Record<string, TrainTimetable>;
+    /** Map of TRNs to their timetables. */
+    trains: FilteredRecord<ArrayOptionValues<Options, "trns", Trn>, TrainTimetable<Options>>;
+}
+
+// --- Subscriptions ---
+
+/** A topic which can be subscribed to. */
+export type SubscriptionTopic =
+    | "station-due-times"
+    | "platform-due-times"
+    | "trains"
+    | "heartbeat-errors"
+    | "heartbeat-warnings"
+    | "heartbeats";
+
+/**
+ * Filters for a `trains` subscription. Each matches any of its values, and missing or empty filters match everything.
+ * Like the history, a change is sent if the train's new status matches,
+ *  and a train becoming inactive is sent if its previous status matched.
+ */
+export interface TrainsSubscriptionFilters extends TrainStatusFilters {
+    /** Which APIs to include data from. Data from other APIs is omitted, and changes to it are ignored. */
+    apis?: readonly TrainDataApi[];
+}
+
+/** A subscription to due times for a station. */
+export interface StationDueTimesSubscription {
+    topic: "station-due-times";
+    /** Station code (e.g., `"MMT"`). */
+    station: string;
+}
+
+/** A subscription to due times for a platform. */
+export interface PlatformDueTimesSubscription {
+    topic: "platform-due-times";
+    /** Platform code (e.g., `"MTW;3"`). */
+    platform: PlatformCode;
+}
+
+/** A subscription to train status changes. */
+export interface TrainsSubscription extends TrainsSubscriptionFilters {
+    topic: "trains";
+}
+
+/** A subscription to new heartbeat errors or warnings. */
+export interface HeartbeatDiagnosticsSubscription {
+    topic: "heartbeat-errors" | "heartbeat-warnings";
+    /** Which APIs to receive errors or warnings for. If omitted, errors or warnings from all APIs are received. */
+    apis?: readonly ApiType[];
+}
+
+/** A subscription to events indicating a heartbeat has finished. */
+export interface HeartbeatsSubscription {
+    topic: "heartbeats";
+}
+
+/** A subscription to any topic, without an ID. */
+export type Subscription =
+    | StationDueTimesSubscription
+    | PlatformDueTimesSubscription
+    | TrainsSubscription
+    | HeartbeatDiagnosticsSubscription
+    | HeartbeatsSubscription;
+
+/**
+ * A subscription, as returned by the proxy.
+ * An ID is generated by the proxy if one is not provided in the request, so this always has an ID.
+ * Subscriptions are normalised, so may not be exactly as requested, but will carry the same meaning.
+ */
+export type SubscriptionResponse = Subscription & {
+    /** Identifies the subscription in messages and for removing/replacing it. */
+    id: string;
+};
+
+/** A subscription to add. */
+export type SubscriptionRequest = Subscription & {
+    /**
+     * Identifies the subscription in messages and for removing/replacing it.
+     * Up to 64 letters, digits, hyphens or underscores.
+     * If a subscription with this ID already exists, it is replaced.
+     * If omitted, an ID is automatically generated by the proxy.
+     */
+    id?: string;
+};
+
+/** The result of adding subscriptions. */
+export interface SubscriptionsChange {
+    /** All the token's subscriptions, after the change. */
+    subscriptions: SubscriptionResponse[];
+    /** The IDs of existing subscriptions which were removed, because they are covered by new ones. */
+    replaced: string[];
+}
+
+/** The result of creating a subscription token. */
+export interface CreateTokenResponse extends SubscriptionsChange {
+    /**
+     * The subscription token, which is needed to manage the subscriptions and receive their messages.
+     * Tokens should be treated as secret, as well as ephemeral since they may expire at any time (e.g., if the proxy restarts).
+     */
+    token: string;
+}
+
+/** Details of a subscription token. */
+export interface SubscriptionTokenDetails {
+    /** All the token's current subscriptions. */
+    subscriptions: SubscriptionResponse[];
+    /** The number of streams currently connected for the token. */
+    streams: number;
+    /** When the token will be deleted if it isn't used in time, or null if any streams are currently connected. */
+    expiresAt: Date | null;
 }
 
 // --- Streams ---
@@ -552,125 +802,97 @@ export interface StreamCallbacks {
     onScheduleReconnect?: (info: { delay: number }) => void;
 }
 
-export interface StreamPayload {
-    /** The timestamp of the heartbeat that created this event. */
-    date: Date;
+/** Options for a subscription token's stream. */
+export interface SubscriptionStreamOptions<WithSubscriptionIds extends boolean = boolean> {
+    /** Whether each message should include the IDs of the subscriptions which it matched. */
+    subscriptionIds?: WithSubscriptionIds;
 }
 
-// --- `/history/stream` Endpoint ---
+/**
+ * A message's payload, along with the IDs of the subscriptions it matched if they were requested.
+ * The conditional type and `Prettify` make editors show the message's properties, rather than the type's name.
+ */
+type SubscriptionMessage<Payload, WithSubscriptionIds extends boolean> =
+    WithSubscriptionIds extends true
+        ? Prettify<Payload & {
+            /** The IDs of the subscriptions which this message matched. */
+            subscriptionIds: string[];
+        }>
+        : Prettify<Payload>;
 
-/** Options for `/history/stream` endpoint */
-export interface HistoryStreamOptions {
-    /** Properties to include for `new-trains-history` events */
-    trainProps?: PropsFilter;
+/** A message for a `station-due-times` subscription. */
+export type StationDueTimesMessage<WithSubscriptionIds extends boolean = boolean> =
+    SubscriptionMessage<{
+        /** The station code, as subscribed to. */
+        station: string;
+        /** The corresponding heartbeat. */
+        heartbeat: HeartbeatTimes;
+        /** The next trains due at the station, in order of `time.dueIn`. */
+        dueTimes: (Omit<StationDueTime, "status"> & { status: CollatedTrain | null })[];
+    }, WithSubscriptionIds>;
+
+/** A message for a `platform-due-times` subscription. */
+export type PlatformDueTimesMessage<WithSubscriptionIds extends boolean = boolean> =
+    SubscriptionMessage<{
+        /** The platform code, as subscribed to. */
+        platform: PlatformCode;
+        /** The corresponding heartbeat. */
+        heartbeat: HeartbeatTimes;
+        /** The next trains due at the platform, in order of `time.dueIn`. */
+        dueTimes: (Omit<PlatformDueTime, "status"> & { status: CollatedTrain | null })[];
+    }, WithSubscriptionIds>;
+
+/** A message for a `trains` subscription, sent when a train's status changes, or when it becomes inactive. */
+export type TrainMessage<WithSubscriptionIds extends boolean = boolean> =
+    SubscriptionMessage<{
+        /** The train's TRN. */
+        trn: Trn;
+        /** The heartbeat during which the status changed. */
+        heartbeat: HeartbeatTimes;
+        /**
+         * The train's new status, or null if it became inactive.
+         * This includes the data from each API included by any of the matching subscriptions.
+         */
+        status: CollatedTrain | null;
+    }, WithSubscriptionIds>;
+
+/** A message for a `heartbeat-errors` subscription. The heartbeat's `endedAt` is always null. */
+export type HeartbeatErrorMessage<WithSubscriptionIds extends boolean = boolean> =
+    SubscriptionMessage<HeartbeatError, WithSubscriptionIds>;
+
+/** A message for a `heartbeat-warnings` subscription. The heartbeat's `endedAt` is always null. */
+export type HeartbeatWarningMessage<WithSubscriptionIds extends boolean = boolean> =
+    SubscriptionMessage<HeartbeatWarning, WithSubscriptionIds>;
+
+/** A message for a `heartbeats` subscription, sent after all the heartbeat's other messages. */
+export type HeartbeatEndMessage<WithSubscriptionIds extends boolean = boolean> =
+    SubscriptionMessage<{
+        /** The heartbeat which ended. */
+        heartbeat: HeartbeatTimes;
+    }, WithSubscriptionIds>;
+
+/** Sent just before the proxy closes a stream, after which it won't be reconnected. */
+export interface StreamClosedMessage {
+    /**
+     * `"replaced"` if this was the oldest stream when another connected for the token (see `MAX_STREAMS_PER_TOKEN`).
+     *  `"deleted"` if the token was deleted.
+     */
+    reason: "replaced" | "deleted";
 }
 
-/** Options for `/history/train/:trn/stream` endpoint */
-export interface TrainHistoryStreamOptions extends FilterableProps {}
-
-/** Options for `/history/trains/stream` endpoint */
-export interface TrainsHistoryStreamOptions {
-    /** List of train running numbers (TRNs, without the leading "T", e.g. "101") to stream updates for */
-    trns?: string[];
-    /** Properties to include for `new-trains-history` events */
-    trainProps?: PropsFilter;
-}
-
-/** Options for `/history/heartbeat-errors/stream` endpoint */
-export interface HeartbeatErrorsStreamOptions {
-    /** List of internal API identifiers to receive errors (and optionally warnings) for. */
-    apis?: string[];
-    // Determine this based on if the developer adds a listener for warnings
-    // /** Whether to also receive warnings. */
-    // warnings?: boolean;
-}
-
-/** Options for `/due-times/station/:station/stream` endpoint */
-export interface StationDueTimesStreamOptions extends FilterableProps {}
-
-/** Options for `/due-times/platform/:platform/stream` endpoint */
-export interface PlatformDueTimesStreamOptions extends FilterableProps {}
-
-/** Payload from the `new-trains-history` event, assuming all properties are present. */
-export interface FullNewTrainsHistoryPayload<
-    Options extends { trns?: string[] } = TrainsHistoryStreamOptions
-> extends StreamPayload {
-    /** A map of train running numbers (TRNs, without the leading "T", e.g. "101") to their new history entries */
-    trains: {
-        [trn in Options extends { trns: string[] } ? Options["trns"][number] : string]: Omit<TrainHistoryEntry, "date">
-    };
-}
-
-/** Payload from the `new-trains-history` event. */
-export type NewTrainsHistoryPayload<Options extends TrainsHistoryStreamOptions = {}> =
-    FilteredByProps<FullNewTrainsHistoryPayload<Options>, Options, "tableProps">;
-
-/** Payload from the `new-train-history` event. */
-export type NewTrainHistoryPayload = StreamPayload & (TrainHistoryEntry | never);
-
-/** Payload from the `heartbeat-error` event. */
-export type HeartbeatErrorPayload<Options extends { apis?: string[] } = {}> =
-    StreamPayload & FilteredByAPI<Omit<HeartbeatErrorEntry, "date">, Options>;
-
-/** Payload from the `heartbeat-warnings` event. */
-export type HeartbeatWarningsPayload<Options extends { apis?: string[] } = {}> =
-    StreamPayload & FilteredByAPI<Omit<HeartbeatWarningsEntry, "date">, Options>;
-
-/** Payload from the `station-due-times` event, assuming all properties are present. */
-export type FullStationDueTimesPayload = StreamPayload & {
-    /** The next trains due at this station, in order of time.dueIn */
-    dueTimes: {
-        /** The platform number */
-        platform: PlatformNumber;
-        /** TRN of the train to arrive at the platform */
-        trn: string;
-        /** When that train is expected to arrive at the platform */
-        time: DueTime;
-        /** The current status of the train */
-        status: CollatedTrain
-    }[];
-};
-
-/** Payload from the `station-due-times` event. */
-export type StationDueTimesPayload<Options extends StationDueTimesStreamOptions = {}> =
-    FilteredByProps<FullStationDueTimesPayload, Options>;
-
-/** Payload from the `platform-due-times` event, assuming all properties are present. */
-export type FullPlatformDueTimesPayload = StreamPayload & {
-    /** List of the next trains due at this platform, in order of time.dueIn */
-    dueTimes: {
-        /** TRN of the train to arrive at the platform */
-        trn: string;
-        /** When that train is expected to arrive at the platform */
-        time: DueTime;
-        /** The current status of the train */
-        status: CollatedTrain
-    }[];
-};
-
-/** Payload from the `platform-due-times` event. */
-export type PlatformDueTimesPayload<Options extends PlatformDueTimesStreamOptions = {}> =
-    FilteredByProps<FullPlatformDueTimesPayload, Options>;
-
-// --- Last Seen Parsing ---
-
-/** Possible states shown in the last seen string provided by the train statuses API. */
-export type ActiveTrainState = "Approaching" | "Arrived" | "Ready to start" | "Departed";
-
-/** Valid platform numbers. */
-export type PlatformNumber = 1 | 2 | 3 | 4;
-
-/** Parts of the last seen string provided by the train statuses API. */
-export type ParsedLastSeen = {
-    state: ActiveTrainState;
-    station: string;
-    platform: PlatformNumber;
-    hours: number;
-    minutes: number;
-}
-
-/** Parts of the location string provided by the times API. */
-export type ParsedTimesAPILocation = {
-    station: string;
-    platform: PlatformNumber;
+export interface SubscriptionStreamCallbacks<WithSubscriptionIds extends boolean = boolean> extends StreamCallbacks {
+    /** What to do when receiving a message for a `station-due-times` subscription. */
+    onStationDueTimes?: (message: StationDueTimesMessage<WithSubscriptionIds>) => void;
+    /** What to do when receiving a message for a `platform-due-times` subscription. */
+    onPlatformDueTimes?: (message: PlatformDueTimesMessage<WithSubscriptionIds>) => void;
+    /** What to do when receiving a message for a `trains` subscription, sent when a train's status changes, or when it becomes inactive. */
+    onTrain?: (message: TrainMessage<WithSubscriptionIds>) => void;
+    /** What to do when receiving a message for a `heartbeat-errors` subscription. The heartbeat's `endedAt` is always null. */
+    onHeartbeatError?: (message: HeartbeatErrorMessage<WithSubscriptionIds>) => void;
+    /** What to do when receiving a message for a `heartbeat-warnings` subscription. The heartbeat's `endedAt` is always null. */
+    onHeartbeatWarning?: (message: HeartbeatWarningMessage<WithSubscriptionIds>) => void;
+    /** What to do when receiving a message for a `heartbeats` subscription, sent after all the heartbeat's other messages. */
+    onHeartbeatEnd?: (message: HeartbeatEndMessage<WithSubscriptionIds>) => void;
+    /** What to do when the proxy intentionally closes the stream. */
+    onStreamClosed?: (message: StreamClosedMessage) => void;
 }

@@ -25,8 +25,9 @@ const trains = await client.getTrains();
 console.log(trains.trains);
 
 // Example: Stream updates to a specific train
-client.streamNewTrainHistory("121", {
-    onNewHistoryEntry: (data) => {
+const { token } = await client.createSubscriptionToken([{ topic: "trains", trns: ["121"] }]);
+client.streamSubscriptions(token, {
+    onTrain: (data) => {
         console.log(data);
     }
 })

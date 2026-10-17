@@ -1,40 +1,50 @@
 import {
     ApiConstants,
+    CollatedTrain,
+    DayTimetable,
+    DueTime,
     DueTimesOptions,
     DueTimesResponse,
-    FullTrainsResponse,
-    HeartbeatErrorPayload,
+    GeoApiData,
     HeartbeatErrorsOptions,
     HeartbeatErrorsResponse,
-    HeartbeatErrorsResponseWithoutWarnings, HeartbeatErrorsStreamOptions,
-    HeartbeatWarningsPayload,
-    HistoryStreamOptions,
-    HistorySummaryResponse, NewTrainHistoryPayload,
-    NewTrainsHistoryPayload,
+    HeartbeatTimes,
+    CreateTokenResponse,
     PlatformCode,
-    PlatformDueTimesOptions, PlatformDueTimesPayload,
-    PlatformDueTimesResponse, PlatformDueTimesStreamOptions,
+    PlatformDueTimesOptions,
+    PlatformDueTimesResponse,
     PropsFilter,
-    StationDueTimesOptions, StationDueTimesPayload,
-    StationDueTimesResponse, StationDueTimesStreamOptions,
-    StreamCallbacks,
+    SnapshotOptions,
+    SnapshotResponse,
+    StationDueTimesOptions,
+    StationDueTimesResponse,
+    SubscriptionRequest,
+    SubscriptionsChange,
+    SubscriptionTokenDetails,
     TimeFilter,
+    TimesApiData,
     TimetableOptions,
-    DayTimetable,
-    TrainHistoryOptions,
-    TrainHistoryResponse, TrainHistoryStreamOptions,
     TrainOptions,
-    TrainResponse, TrainsHistoryStreamOptions,
+    TrainResponse,
+    TrainsAvailabilityOptions,
+    TrainsAvailabilityResponse,
+    TrainsHistoryOptions,
+    TrainsHistoryResponse,
     TrainsOptions,
-    TrainsResponse
+    TrainsResponse,
+    TrainStatusFilters,
+    SubscriptionStreamCallbacks,
+    SubscriptionStreamOptions,
 } from "./types";
 import {createEventSource} from 'eventsource-client'
 
-function serializeProps(props: PropsFilter) {
+// --- Serialisation ---
+
+function serialiseProps(props: PropsFilter): string {
     return props.join(',');
 }
 
-function serializeTimeFilter(timeFilter: TimeFilter) {
+function serialiseTimeFilter(timeFilter: TimeFilter): string {
     if ('at' in timeFilter) return timeFilter.at.getTime().toString();
     let from = '';
     let to = '';
@@ -43,62 +53,97 @@ function serializeTimeFilter(timeFilter: TimeFilter) {
     return `${from}...${to}`;
 }
 
-function deserializeCollatedTrain(train: any) {
-    if (!train.timesAPI) return train;
-    const copy = structuredClone(train);
-    if (copy.timesAPI.lastEvent?.time !== undefined) {
-        copy.timesAPI.lastEvent.time = new Date(copy.timesAPI.lastEvent.time);
+function appendAll(queryParams: URLSearchParams, name: string, values?: readonly (string | number)[]): void {
+    for (const value of values ?? []) {
+        queryParams.append(name, value.toString());
     }
-    if (copy.timesAPI.plannedDestinations) {
-        for (const plannedDestination of copy.timesAPI.plannedDestinations) {
-            if (plannedDestination.from?.time !== undefined) {
-                plannedDestination.from.time = new Date(plannedDestination.from.time);
-            }
-        }
-    }
-    if (copy.timesAPI.nextPlatforms) {
-        for (const nextPlatform of copy.timesAPI.nextPlatforms) {
-            if (nextPlatform.time) {
-                if (nextPlatform.time.actualScheduledTime !== undefined && nextPlatform.time.actualScheduledTime !== null) {
-                    nextPlatform.time.actualScheduledTime = new Date(nextPlatform.time.actualScheduledTime);
-                }
-                if (nextPlatform.time.plannedScheduledTime !== undefined) {
-                    nextPlatform.time.actualPredictedTime = new Date(nextPlatform.time.actualPredictedTime);
-                }
-            }
-        }
-    }
-    return copy;
 }
 
-function deserializeHistoryEntry(historyEntry: any) {
-    const copy = structuredClone(historyEntry);
-    if (copy.date !== undefined) copy.date = new Date(copy.date);
-    if (copy.status) copy.status =  deserializeCollatedTrain(copy.status);
-    return copy;
+function appendTrainStatusFilters(queryParams: URLSearchParams, filters: TrainStatusFilters): void {
+    appendAll(queryParams, 'trn', filters.trns);
+    appendAll(queryParams, 'eventType', filters.eventTypes);
+    appendAll(queryParams, 'location', filters.locations);
+    appendAll(queryParams, 'destination', filters.destinations);
 }
 
-function deserializeTrainHistorySummary(historySummary: any) {
-    const copy = structuredClone(historySummary);
-    copy.firstEntry = new Date(copy.firstEntry);
-    copy.lastEntry = new Date(copy.lastEntry);
-    return copy;
+// --- Deserialisation ---
+
+function toDate<T extends number | null | undefined>(timestamp: T): T extends number ? Date : T {
+    return (
+        timestamp === null || timestamp === undefined ? timestamp : new Date(timestamp)
+    ) as (T extends number ? Date : T);
 }
 
-function deserializeDueTimes(dueTimes: any) {
-    const copy = structuredClone(dueTimes);
-    for (const dueTime of copy) {
-        if (dueTime.time) {
-            if (dueTime.time.actualScheduledTime !== undefined && dueTime.time.actualScheduledTime !== null) {
-                dueTime.time.actualScheduledTime = new Date(dueTime.time.actualScheduledTime);
-            }
-            if (dueTime.time.actualPredictedTime !== undefined) {
-                dueTime.time.actualPredictedTime = new Date(dueTime.time.actualPredictedTime);
-            }
-        }
-        if (dueTime.status) dueTime.status = deserializeCollatedTrain(dueTime.status);
+function deserialiseHeartbeat(heartbeat: any): HeartbeatTimes {
+    if (heartbeat) {
+        if ('startedAt' in heartbeat) heartbeat.startedAt = toDate(heartbeat.startedAt);
+        if ('endedAt' in heartbeat) heartbeat.endedAt = toDate(heartbeat.endedAt);
     }
-    return copy;
+    return heartbeat;
+}
+
+function deserialiseDueTime(time: any): DueTime {
+    if (time) {
+        if ('actualScheduledTime' in time) time.actualScheduledTime = toDate(time.actualScheduledTime);
+        if ('actualPredictedTime' in time) time.actualPredictedTime = toDate(time.actualPredictedTime);
+    }
+    return time;
+}
+
+function deserialiseTimesApiData(data: any): TimesApiData {
+    if (data.lastEvent?.time !== undefined) {
+        data.lastEvent.time = toDate(data.lastEvent.time);
+    }
+    for (const plannedDestination of data.plannedDestinations ?? []) {
+        if (plannedDestination.from?.time !== undefined) {
+            plannedDestination.from.time = toDate(plannedDestination.from.time);
+        }
+    }
+    for (const nextPlatform of data.nextPlatforms ?? []) {
+        deserialiseDueTime(nextPlatform.time);
+    }
+    return data;
+}
+
+function deserialiseGeoApiData(data: any): GeoApiData {
+    if (typeof data.lastSeen === 'object' && data.lastSeen?.time !== undefined) {
+        data.lastSeen.time = toDate(data.lastSeen.time);
+    }
+    return data;
+}
+
+function deserialiseCollatedTrain(train: any): CollatedTrain {
+    if (train?.timesAPI) deserialiseTimesApiData(train.timesAPI);
+    if (train?.geoAPI) deserialiseGeoApiData(train.geoAPI);
+    return train;
+}
+
+function deserialiseDueTimes(dueTimes: any[]) {
+    for (const dueTime of dueTimes) {
+        deserialiseDueTime(dueTime.time);
+        if (dueTime.status) deserialiseCollatedTrain(dueTime.status);
+    }
+    return dueTimes;
+}
+
+function deserialiseHistoryEntry(entry: any, deserialiseStatus: (status: any) => unknown) {
+    deserialiseHeartbeat(entry.startHeartbeat);
+    deserialiseHeartbeat(entry.endHeartbeat);
+    deserialiseStatus(entry.status);
+}
+
+// --- Client ---
+
+/** An error response from the proxy. */
+export class MetroApiError extends Error {
+    constructor(
+        /** The HTTP status code */
+        public readonly status: number,
+        /** The error message from the proxy */
+        public readonly body: string
+    ) {
+        super(`${status}: ${body}`);
+    }
 }
 
 /**
@@ -109,12 +154,28 @@ export class MetroApiClient {
         this.baseUrl = baseUrl.replace(/\/$/, '');
     }
 
+    /** Fetches from the proxy, throwing a `MetroApiError` if it responds with an HTTP error */
+    private async request(method: string, path: string, queryParams?: URLSearchParams, body?: unknown): Promise<any> {
+        const response = await fetch(`${this.baseUrl}${path}${queryParams?.size ? `?${queryParams}` : ''}`, {
+            method,
+            headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+            body: body === undefined ? undefined : JSON.stringify(body),
+        });
+        if (!response.ok) throw new MetroApiError(response.status, await response.text());
+        if (response.status === 204) return;
+        return response.json();
+    }
+
+    /** Fetches from the proxy with a GET request, throwing a `MetroApiError` if it responds with an HTTP error */
+    private async get(path: string, queryParams?: URLSearchParams): Promise<any> {
+        return this.request('GET', path, queryParams);
+    }
+
     /**
-     * Gets various constants used by the proxy (new day hour, refresh intervals, history length, stations...)
+     * Gets various constants used by the proxy (new day hour, refresh intervals, history limits, stations...)
      */
     async getConstants(): Promise<ApiConstants> {
-        const response = await fetch(`${this.baseUrl}/constants`);
-        return response.json();
+        return this.get('/constants');
     }
 
     /**
@@ -124,18 +185,15 @@ export class MetroApiClient {
     async getTrains<Options extends TrainsOptions>(opts?: Options): Promise<TrainsResponse<Options>> {
         const queryParams = new URLSearchParams();
         if (opts?.props) {
-          queryParams.append('props', serializeProps(opts.props));
+          queryParams.append('props', serialiseProps(opts.props));
         }
-        const response = await fetch(`${this.baseUrl}/trains?${queryParams}`);
+        const data = await this.get('/trains', queryParams);
 
-        // It's not necessarily Full, but it's easier to assume it is
-        const data = await response.json() as FullTrainsResponse;
-
-        if (data.lastChecked) data.lastChecked = new Date(data.lastChecked);
+        if (data.lastHeartbeat) deserialiseHeartbeat(data.lastHeartbeat);
         if (data.trains && !Array.isArray(data.trains)) {
-            for (const train of Object.values(data.trains)) {
-                if (train.status) train.status = deserializeCollatedTrain(train.status);
-                if (train.lastChanged !== undefined) train.lastChanged = new Date(train.lastChanged);
+            for (const train of Object.values(data.trains) as any[]) {
+                if (train.status) deserialiseCollatedTrain(train.status);
+                if (train.statusLastChanged) deserialiseHeartbeat(train.statusLastChanged);
             }
         }
 
@@ -150,56 +208,111 @@ export class MetroApiClient {
     async getTrain<Options extends TrainOptions>(trn: string, opts?: Options): Promise<TrainResponse<Options>> {
         const queryParams = new URLSearchParams();
         if (opts?.props) {
-          queryParams.append('props', serializeProps(opts.props));
+          queryParams.append('props', serialiseProps(opts.props));
         }
-        const response = await fetch(`${this.baseUrl}/train/${trn}?${queryParams}`);
-        const data = await response.json();
-        if (data.lastChecked) data.lastChecked = new Date(data.lastChecked);
-        if (data.lastChanged) data.lastChanged = new Date(data.lastChanged);
-        if (data.status) data.status = deserializeCollatedTrain(data.status);
+        const data = await this.get(`/train/${encodeURIComponent(trn)}`, queryParams);
+
+        if (data.lastHeartbeat) deserialiseHeartbeat(data.lastHeartbeat);
+        if (data.statusLastChangedDuring) deserialiseHeartbeat(data.statusLastChangedDuring);
+        if (data.status) deserialiseCollatedTrain(data.status);
+
         return data;
     }
 
     /**
-     * Gets a summary of the history of all trains with recent history
+     * Gets the TRNs of all trains which have any history, in alphabetical order.
      */
-    async getHistorySummary(): Promise<HistorySummaryResponse> {
-        const response = await fetch(`${this.baseUrl}/history`);
-        const data = await response.json() as HistorySummaryResponse;
-        data.lastChecked = new Date(data.lastChecked);
-        for (const trn of Object.keys(data.trains)) {
-            data.trains[trn] = deserializeTrainHistorySummary(data.trains[trn]);
-        }
-        return data;
+    async getTrnsWithHistory(): Promise<string[]> {
+        return this.get('/history/trns');
     }
 
     /**
-     * Gets the history of a train
-     * @param trn TRN of the train
+     * Gets the history of statuses for one or more trains.
+     * Each entry is a period during which a train's status (in one API) stayed the same.
      * @param opts Options
      */
-    async getTrainHistory<Options extends TrainHistoryOptions>(trn: string, opts?: Options): Promise<TrainHistoryResponse<Options>> {
+    async getTrainsHistory<const Options extends TrainsHistoryOptions = {}>(
+        opts?: Options
+    ): Promise<TrainsHistoryResponse<Options>> {
         const queryParams = new URLSearchParams();
         if (opts) {
-            if (opts.time) {
-                queryParams.append('time', serializeTimeFilter(opts.time));
-            }
-            if (opts.limit) {
-                queryParams.append('limit', opts.limit.toString());
-            }
-            if (opts.active !== undefined) {
-                queryParams.append('active', opts.active ? '1' : '0');
-            }
-            if (opts.props) {
-                queryParams.append('props', serializeProps(opts.props));
+            appendTrainStatusFilters(queryParams, opts);
+            appendAll(queryParams, 'api', opts.apis);
+            if (opts.time) queryParams.append('time', serialiseTimeFilter(opts.time));
+            if (opts.limit) queryParams.append('limit', opts.limit.toString());
+            if (opts.limitPerTrn) queryParams.append('limitPerTrn', opts.limitPerTrn.toString());
+        }
+
+        const data = await this.get('/history/trains', queryParams);
+
+        for (const train of Object.values(data.trains) as any[]) {
+            for (const entry of train.timesAPI ?? []) deserialiseHistoryEntry(entry, deserialiseTimesApiData);
+            for (const entry of train.geoAPI ?? []) deserialiseHistoryEntry(entry, deserialiseGeoApiData);
+        }
+        data.truncatedTo = toDate(data.truncatedTo);
+
+        return data;
+    }
+
+    /**
+     * Gets the time ranges during which specific trains were continuously active in each API.
+     * @param opts Options
+     */
+    async getTrainsAvailability<const Options extends TrainsAvailabilityOptions = {}>(
+        opts?: Options
+    ): Promise<TrainsAvailabilityResponse<Options>> {
+        const queryParams = new URLSearchParams();
+        if (opts) {
+            appendAll(queryParams, 'trn', opts.trns);
+            appendAll(queryParams, 'api', opts.apis);
+            if (opts.time) queryParams.append('time', serialiseTimeFilter(opts.time));
+            if (opts.limit) queryParams.append('limit', opts.limit.toString());
+            if (opts.limitPerTrn) queryParams.append('limitPerTrn', opts.limitPerTrn.toString());
+        }
+
+        const data = await this.get('/history/trains/availability', queryParams);
+
+        for (const train of Object.values(data.trains) as any[]) {
+            for (const ranges of Object.values(train) as any[]) {
+                for (const range of ranges) {
+                    range.start = toDate(range.start);
+                    if (range.end !== undefined) range.end = toDate(range.end);
+                }
             }
         }
-        const response = await fetch(`${this.baseUrl}/history/train/${trn}?${queryParams}`);
+        data.truncatedTo = toDate(data.truncatedTo);
 
-        const data = await response.json();
-        if (data.lastChecked) data.lastChecked = new Date(data.lastChecked);
-        if (data.summary) data.summary = deserializeTrainHistorySummary(data.summary);
-        if (data.extract) data.extract = data.extract.map(deserializeHistoryEntry);
+        return data;
+    }
+
+    /**
+     * Gets all the data from the heartbeat at a time, or null if there is no heartbeat matching the time.
+     * @param time The time to get the snapshot of
+     * @param opts Options
+     */
+    async getSnapshot<const Options extends SnapshotOptions = {}>(
+        time: Date,
+        opts?: Options
+    ): Promise<SnapshotResponse<Options> | null> {
+        const queryParams = new URLSearchParams({ time: time.getTime().toString() });
+        if (opts) {
+            appendTrainStatusFilters(queryParams, opts);
+            if (opts.matchStrategy) queryParams.append('matchStrategy', opts.matchStrategy);
+        }
+
+        let data: any;
+        try {
+            data = await this.get('/history/snapshot', queryParams);
+        } catch (e) {
+            if (e instanceof MetroApiError && e.status === 404) return null;
+            throw e;
+        }
+
+        deserialiseHeartbeat(data.heartbeat);
+        for (const train of Object.values(data.timesApiTrains)) deserialiseTimesApiData(train);
+        for (const train of Object.values(data.geoApiTrains)) deserialiseGeoApiData(train);
+        for (const heartbeat of Object.values(data.statusLastChanged)) deserialiseHeartbeat(heartbeat);
+
         return data;
     }
 
@@ -207,33 +320,26 @@ export class MetroApiClient {
      * Gets any errors (and optionally warnings) that have occurred during a heartbeat.
      * @param opts Options
      */
-    async getHeartbeatErrors<Options extends HeartbeatErrorsOptions>(opts?: Options): Promise<HeartbeatErrorsResponse<Options>> {
+    async getHeartbeatErrors<const Options extends HeartbeatErrorsOptions = {}>(
+        opts?: Options
+    ): Promise<HeartbeatErrorsResponse<Options>> {
         const queryParams = new URLSearchParams();
         if (opts) {
             if (opts.warnings) {
                 queryParams.append('warnings', '');
             }
             if (opts.time) {
-                queryParams.append('time', serializeTimeFilter(opts.time));
+                queryParams.append('time', serialiseTimeFilter(opts.time));
             }
-            if (opts.apis) {
-                queryParams.append('apis', opts.apis.join(','));
-            }
+            appendAll(queryParams, 'api', opts.apis);
         }
-        const response = await fetch(`${this.baseUrl}/history/heartbeat-errors?${queryParams}`);
-        const data = await response.json();
-        if ('warnings' in data) {
-            for (const error of data.errors) {
-                error.date = new Date(error.date);
-            }
-            for (const warning of data.warnings) {
-                warning.date = new Date(warning.date);
-            }
-        } else {
-            for (const error of data as HeartbeatErrorsResponseWithoutWarnings) {
-                error.date = new Date(error.date);
-            }
+
+        const data = await this.get('/history/heartbeat-errors', queryParams);
+
+        for (const entry of Array.isArray(data) ? data : [...data.errors, ...data.warnings]) {
+            deserialiseHeartbeat(entry.heartbeat);
         }
+
         return data;
     }
 
@@ -244,12 +350,16 @@ export class MetroApiClient {
     async getDueTimes<Options extends DueTimesOptions>(opts?: Options): Promise<DueTimesResponse<Options>> {
         const queryParams = new URLSearchParams();
         if (opts?.props) {
-            queryParams.append('props', serializeProps(opts.props));
+            queryParams.append('props', serialiseProps(opts.props));
         }
-        const response = await fetch(`${this.baseUrl}/due-times?${queryParams}`);
-        const data = await response.json();
-        if (data.lastChecked) data.lastChecked = new Date(data.lastChecked);
-        if (data.dueTimes) data.dueTimes = deserializeDueTimes(data.dueTimes);
+
+        const data = await this.get('/due-times', queryParams);
+
+        if (data.lastHeartbeat) deserialiseHeartbeat(data.lastHeartbeat);
+        for (const dueTimes of Object.values(data.dueTimes ?? {}) as any[][]) {
+            deserialiseDueTimes(dueTimes);
+        }
+
         return data;
     }
 
@@ -261,12 +371,14 @@ export class MetroApiClient {
     async getPlatformDueTimes<Options extends PlatformDueTimesOptions>(platformCode: PlatformCode, opts?: Options): Promise<PlatformDueTimesResponse<Options>> {
         const queryParams = new URLSearchParams();
         if (opts?.props) {
-            queryParams.append('props', serializeProps(opts.props));
+            queryParams.append('props', serialiseProps(opts.props));
         }
-        const response = await fetch(`${this.baseUrl}/due-times/platform/${platformCode}?${queryParams}`);
-        const data = await response.json();
-        if (data.lastChecked) data.lastChecked = new Date(data.lastChecked);
-        if (data.dueTimes) data.dueTimes = deserializeDueTimes(data.dueTimes);
+
+        const data = await this.get(`/due-times/platform/${encodeURIComponent(platformCode)}`, queryParams);
+
+        if (data.lastHeartbeat) deserialiseHeartbeat(data.lastHeartbeat);
+        if (data.dueTimes) deserialiseDueTimes(data.dueTimes);
+
         return data;
     }
 
@@ -278,12 +390,14 @@ export class MetroApiClient {
     async getStationDueTimes<Options extends StationDueTimesOptions>(stationCode: string, opts?: Options): Promise<StationDueTimesResponse<Options>> {
         const queryParams = new URLSearchParams();
         if (opts?.props) {
-            queryParams.append('props', serializeProps(opts.props));
+            queryParams.append('props', serialiseProps(opts.props));
         }
-        const response = await fetch(`${this.baseUrl}/due-times/station/${stationCode}?${queryParams}`);
-        const data = await response.json();
-        if (data.lastChecked) data.lastChecked = new Date(data.lastChecked);
-        if (data.dueTimes) data.dueTimes = deserializeDueTimes(data.dueTimes);
+
+        const data = await this.get(`/due-times/station/${encodeURIComponent(stationCode)}`, queryParams);
+
+        if (data.lastHeartbeat) deserialiseHeartbeat(data.lastHeartbeat);
+        if (data.dueTimes) deserialiseDueTimes(data.dueTimes);
+
         return data;
     }
 
@@ -291,7 +405,7 @@ export class MetroApiClient {
      * Gets the timetable for a day. This is maintained by the host of the proxy, and is not guaranteed to be up to date.
      * @param opts Options
      */
-    async getTimetable(opts?: TimetableOptions): Promise<DayTimetable> {
+    async getTimetable<const Options extends TimetableOptions = {}>(opts?: Options): Promise<DayTimetable<Options>> {
         const queryParams = new URLSearchParams();
         if (opts) {
             if (opts.date) {
@@ -304,11 +418,10 @@ export class MetroApiClient {
             if (opts.limit) {
                 queryParams.append('limit', opts.limit.toString());
             }
-            for (const opt of ['trns', 'types', 'locations', 'destinations'] as const) {
-                if (opts[opt]) {
-                    queryParams.append(opt, opts[opt].join(','));
-                }
-            }
+            appendAll(queryParams, 'trn', opts.trns);
+            appendAll(queryParams, 'type', opts.types);
+            appendAll(queryParams, 'location', opts.locations);
+            appendAll(queryParams, 'destination', opts.destinations);
             if (opts.inService !== undefined) {
                 queryParams.append('inService', opts.inService ? '1' : '0');
             }
@@ -316,52 +429,126 @@ export class MetroApiClient {
                 queryParams.append('onlyTermini', '1');
             }
         }
-        const response = await fetch(`${this.baseUrl}/timetable?${queryParams}`);
-        const data = await response.json();
+
+        const data = await this.get('/timetable', queryParams);
+
         data.bitmask = BigInt('0x' + data.bitmask);
+
         return data;
     }
 
     /**
-     * Streams all new train history, heartbeat errors and warnings.
-     * @param callbacks Callbacks for the events
+     * Leases a token with some subscriptions.
+     * Use `streamSubscriptions` to receive messages for the token's subscriptions.
+     * @param subscriptions Subscriptions to add, of which there must be at least one
+     */
+    async createSubscriptionToken(subscriptions: SubscriptionRequest[]): Promise<CreateTokenResponse> {
+        return this.request('POST', '/subscriptions', undefined, { subscriptions });
+    }
+
+    /**
+     * Gets information about a token, such as its current `subscriptions`, how many `streams` are connected (0 or 1),
+     *  and when it `expiresAt` (or `null` while a stream is connected).
+     * Throws a `MetroApiError` with status 404 if the token no longer exists, in which case a new one should be created.
+     * @param token Subscription token
+     */
+    async getSubscriptions(token: string): Promise<SubscriptionTokenDetails> {
+        const data = await this.get(`/subscriptions/${encodeURIComponent(token)}`);
+
+        data.expiresAt = toDate(data.expiresAt);
+
+        return data;
+    }
+
+    /**
+     * Adds subscriptions to a subscription token.
+     * New subscriptions replace any existing subscriptions with the same ID, or which they cover.
+     * Either all of the subscriptions are added, or none are if any are invalid, redundant, or would exceed the limits.
+     * @param token Subscription token
+     * @param subscriptions Subscriptions to add, of which there must be at least one
+     */
+    async subscribe(token: string, subscriptions: SubscriptionRequest[]): Promise<SubscriptionsChange> {
+        return this.request('POST', `/subscriptions/${encodeURIComponent(token)}`, undefined, { subscriptions });
+    }
+
+    /**
+     * Removes a single subscription from a subscription token.
+     * @param token Subscription token
+     * @param id ID of the subscription
+     */
+    async unsubscribe(token: string, id: string): Promise<void> {
+        await this.request('DELETE', `/subscriptions/${encodeURIComponent(token)}/${encodeURIComponent(id)}`);
+    }
+
+    /**
+     * Deletes a subscription token, along with its subscriptions. Any connected streams are closed.
+     * @param token Subscription token
+     */
+    async deleteSubscriptionToken(token: string): Promise<void> {
+        await this.request('DELETE', `/subscriptions/${encodeURIComponent(token)}`);
+    }
+
+    /**
+     * Streams messages for a subscription token's subscriptions.
+     * Each token can only have `MAX_STREAMS_PER_TOKEN` streams connected (see `getConstants`), so connecting more
+     *  closes the oldest.
+     * If the proxy closes the stream (`onStreamClosed`), it won't be reconnected.
+     * @param token Subscription token
+     * @param callbacks Callbacks for each topic's messages
      * @param opts Options
      */
-    streamHistory<Options extends HistoryStreamOptions>(
-            callbacks: StreamCallbacks & {
-                onNewTrainHistoryEntries: (data: NewTrainsHistoryPayload) => void,
-                onHeartbeatError: (data: HeartbeatErrorPayload) => void,
-                onHeartbeatWarnings: (data: HeartbeatWarningsPayload) => void,
-            },
-            opts?: Options
+    streamSubscriptions<WithSubscriptionIds extends boolean = false>(
+            token: string,
+            callbacks: SubscriptionStreamCallbacks<WithSubscriptionIds>,
+            opts?: SubscriptionStreamOptions<WithSubscriptionIds>
     ): {
         close(): void;
         connect(): void;
     } {
         const queryParams = new URLSearchParams();
-        if (opts?.trainProps) {
-            queryParams.append('trainProps', serializeProps(opts.trainProps));
+        if (opts?.subscriptionIds) {
+            queryParams.append('subscriptionIds', '');
         }
-        return createEventSource({
-            url: `${this.baseUrl}/history/stream?${queryParams}`,
-            ...callbacks,
+
+        const eventSource = createEventSource({
+            url: `${this.baseUrl}/subscriptions/${encodeURIComponent(token)}/stream?${queryParams}`,
+            onConnect: callbacks.onConnect,
+            onDisconnect: callbacks.onDisconnect,
+            onScheduleReconnect: callbacks.onScheduleReconnect,
             onMessage: (event) => {
-                const data = JSON.parse(event.data);
-                if (data.date !== undefined) data.date = new Date(data.date);
+                function handle<Message>(
+                    callback: ((message: Message) => void) | undefined,
+                    deserialise?: (message: any) => void
+                ) {
+                    if (!callback) return;
+                    const message = JSON.parse(event.data);
+                    deserialiseHeartbeat(message.heartbeat);
+                    deserialise?.(message);
+                    callback(message);
+                }
+
                 switch (event.event) {
-                    case 'new-trains-history':
-                        if (data.trains && !Array.isArray(data.trains)) {
-                            for (const train of Object.values(data.trains) as any[]) {
-                                if (train.status) train.status = deserializeCollatedTrain(train.status);
-                            }
-                        }
-                        callbacks.onNewTrainHistoryEntries(data);
+                    case 'station-due-times':
+                        handle(callbacks.onStationDueTimes, message => deserialiseDueTimes(message.dueTimes));
+                        break;
+                    case 'platform-due-times':
+                        handle(callbacks.onPlatformDueTimes, message => deserialiseDueTimes(message.dueTimes));
+                        break;
+                    case 'train':
+                        handle(callbacks.onTrain, message => deserialiseCollatedTrain(message.status));
                         break;
                     case 'heartbeat-error':
-                        callbacks.onHeartbeatError(data);
+                        handle(callbacks.onHeartbeatError);
                         break;
-                    case 'heartbeat-warnings':
-                        callbacks.onHeartbeatWarnings(data);
+                    case 'heartbeat-warning':
+                        handle(callbacks.onHeartbeatWarning);
+                        break;
+                    case 'heartbeat-end':
+                        handle(callbacks.onHeartbeatEnd);
+                        break;
+                    case 'stream-closed':
+                        eventSource.close();
+                        handle(callbacks.onStreamClosed);
                         break;
                     default:
                         console.warn(`Unknown event type: ${event.event}`);
@@ -369,194 +556,6 @@ export class MetroApiClient {
                 }
             }
         });
-    }
-
-
-    /**
-     * Streams real-time updates for a single train.
-     * @param trn TRN of the train
-     * @param callbacks Callbacks for the events
-     * @param opts Options
-     */
-    streamNewTrainHistory(
-            trn: string,
-            callbacks: StreamCallbacks & {
-                onNewHistoryEntry: (data: NewTrainHistoryPayload) => void,
-            },
-            opts?: TrainHistoryStreamOptions
-    ): {
-        close(): void;
-        connect(): void;
-    } {
-        const queryParams = new URLSearchParams();
-        if (opts?.props) {
-            queryParams.append('props', serializeProps(opts.props));
-        }
-        return createEventSource({
-            url: `${this.baseUrl}/history/train/${trn}/stream?${queryParams}`,
-            ...callbacks,
-            onMessage: (event) => {
-                if (event.event !== 'new-train-history') {
-                    console.warn(`Unknown event type: ${event.event}`);
-                    return;
-                }
-                const data = JSON.parse(event.data);
-                if (data.date !== undefined) data.date = new Date(data.date);
-                if (data.status) data.status = deserializeCollatedTrain(data.status);
-                callbacks.onNewHistoryEntry(data);
-            }
-        });
-    }
-
-    /**
-     * Streams real-time train history updates.
-     * @param callbacks Callbacks for the events
-     * @param opts Options
-     */
-    streamTrainsHistory(
-            callbacks: StreamCallbacks & {
-                onNewHistoryEntries: (data: NewTrainsHistoryPayload) => void,
-            },
-            opts?: TrainsHistoryStreamOptions
-    ): {
-        close(): void;
-        connect(): void;
-    } {
-        const queryParams = new URLSearchParams();
-        if (opts?.trainProps) {
-            queryParams.append('trainProps', serializeProps(opts.trainProps));
-        }
-        return createEventSource({
-            url: `${this.baseUrl}/history/trains/stream?${queryParams}`,
-            ...callbacks,
-            onMessage: (event) => {
-                if (event.event !== 'new-trains-history') {
-                    console.warn(`Unknown event type: ${event.event}`);
-                    return;
-                }
-                const data = JSON.parse(event.data);
-                if (data.date !== undefined) data.date = new Date(data.date);
-                if (data.trains && !Array.isArray(data.trains)) {
-                    for (const train of Object.values(data.trains) as any[]) {
-                        if (train.status) {
-                            train.status = deserializeCollatedTrain(train.status);
-                        }
-                    }
-                }
-                callbacks.onNewHistoryEntries(data);
-            }
-        });
-    }
-
-    /**
-     * Streams heartbeat errors (and optionally warnings).
-     * @param callbacks Callbacks for the events
-     * @param opts Options
-     */
-    streamHeartbeatErrors(
-            callbacks: StreamCallbacks & {
-                onHeartbeatError: (data: HeartbeatErrorPayload) => void,
-                onHeartbeatWarnings?: (data: HeartbeatWarningsPayload) => void,
-            },
-            opts?: HeartbeatErrorsStreamOptions
-    ): {
-        close(): void;
-        connect(): void;
-    } {
-        const queryParams = new URLSearchParams();
-        if (callbacks.onHeartbeatWarnings) {
-            queryParams.append('warnings', '');
-        }
-        if (opts?.apis) {
-            queryParams.append('apis', opts.apis.join(','));
-        }
-        return createEventSource({
-            url: `${this.baseUrl}/history/heartbeat-errors/stream?${queryParams}`,
-            ...callbacks,
-            onMessage: (event) => {
-                const data = JSON.parse(event.data);
-                if (data.date !== undefined) data.date = new Date(data.date);
-                switch (event.event) {
-                    case 'heartbeat-error':
-                        callbacks.onHeartbeatError(data);
-                        break;
-                    case 'heartbeat-warnings':
-                        if (callbacks.onHeartbeatWarnings) {
-                            callbacks.onHeartbeatWarnings(data);
-                        } else {
-                            console.warn("Received heartbeat-warnings event, but it wasn't subscribed to.");
-                        }
-                        break;
-                    default:
-                        console.warn(`Unexpected event type: ${event.event}`);
-                        break;
-                }
-            }
-        });
-    }
-
-    /**
-     * Streams real-time due times for a station.
-     * @param stationCode Station code
-     * @param callbacks Callbacks for the events
-     * @param opts Options
-     */
-    streamStationDueTimes<Options extends StationDueTimesStreamOptions>(
-            stationCode: string,
-            callbacks: StreamCallbacks & {
-                onDueTimes: (data: StationDueTimesPayload<Options>) => void,
-            },
-            opts?: Options
-    ): {
-        close(): void;
-        connect(): void;
-    } {
-        const queryParams = new URLSearchParams();
-        if (opts?.props) {
-            queryParams.append('props', serializeProps(opts.props));
-        }
-        return createEventSource({
-            url: `${this.baseUrl}/due-times/station/${stationCode}/stream?${queryParams}`,
-            ...callbacks,
-            onMessage: (event) => {
-                const data = JSON.parse(event.data);
-                if (data.date !== undefined) data.date = new Date(data.date);
-                if (data.dueTimes) data.dueTimes = deserializeDueTimes(data.dueTimes);
-                callbacks.onDueTimes(data);
-            }
-        });
-    }
-
-
-    /**
-     * Streams real-time due times for a platform.
-     * @param platformCode Platform code
-     * @param callbacks Callbacks for the events
-     * @param opts Options
-     */
-    streamPlatformDueTimes<Options extends PlatformDueTimesStreamOptions>(
-            platformCode: string,
-            callbacks: StreamCallbacks & {
-                onDueTimes: (data: PlatformDueTimesPayload<Options>) => void,
-            },
-            opts?: Options
-    ): {
-        close(): void;
-        connect(): void;
-    } {
-        const queryParams = new URLSearchParams();
-        if (opts?.props) {
-            queryParams.append('props', serializeProps(opts.props));
-        }
-        return createEventSource({
-            url: `${this.baseUrl}/due-times/platform/${platformCode}/stream?${queryParams}`,
-            ...callbacks,
-            onMessage: (event) => {
-                const data = JSON.parse(event.data);
-                if (data.date !== undefined) data.date = new Date(data.date);
-                if (data.dueTimes) data.dueTimes = deserializeDueTimes(data.dueTimes);
-                callbacks.onDueTimes(data);
-            }
-        });
+        return eventSource;
     }
 }

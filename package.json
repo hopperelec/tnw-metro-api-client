@@ -1,5 +1,5 @@
 {
-  "name": "metro-api-client",
+  "name": "tnw-metro-api-client",
   "version": "4.0.0",
   "description": "A client library for my Tyne and Wear Metro API proxy and data aggregator.",
   "type": "module",
@@ -32,13 +32,13 @@
   ],
   "author": "Cameron Johnston <hopperelec@gmail.com>",
   "license": "CC-BY-SA-4.0",
-  "homepage": "https://github.com/hopperelec/metro-api-client",
+  "homepage": "https://github.com/hopperelec/tnw-metro-api-client",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hopperelec/metro-api-client.git"
+    "url": "git+https://github.com/hopperelec/tnw-metro-api-client.git"
   },
   "bugs": {
-    "url": "https://github.com/hopperelec/metro-api-client/issues"
+    "url": "https://github.com/hopperelec/tnw-metro-api-client/issues"
   },
   "devDependencies": {
     "tsup": "^8.4.0",

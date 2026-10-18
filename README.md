@@ -1,21 +1,21 @@
-# metro-api-client
+# tnw-metro-api-client
 
 A client library for my [Tyne and Wear Metro API proxy and data aggregator](https://github.com/hopperelec/tnw-metro-api).
 
 ## Installation
 
 ```bash
-npm install metro-api-client
+npm install tnw-metro-api-client
 # or
-yarn add metro-api-client
+yarn add tnw-metro-api-client
 # or
-pnpm add metro-api-client
+pnpm add tnw-metro-api-client
 ```
 
 ## Basic Usage
 
 ```typescript
-import { MetroApiClient } from 'metro-api-client';
+import { MetroApiClient } from 'tnw-metro-api-client';
 
 // Replace with your proxy's URL. This shouldn't include the API version (e.g. `/v1`), since the client adds it itself.
 const baseUrl = 'http://localhost:3000/api';
@@ -45,7 +45,7 @@ To override this behaviour, such as to send it to your own logs, pass `onDepreca
 const client = new MetroApiClient(baseUrl, {
     onDeprecation: ({ sunset, link }) => {
         myLogger.warn(
-            `metro-api-client needs updating (stops working: ${sunset?.toISOString() ?? 'unknown'}, ` +
+            `tnw-metro-api-client needs updating (stops working: ${sunset?.toISOString() ?? 'unknown'}, ` +
             `more information: ${link ?? 'none'})`
         );
     }

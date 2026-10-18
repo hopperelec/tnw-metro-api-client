@@ -1,4 +1,5 @@
 export { MetroApiClient, MetroApiError } from './client';
+export type { ApiDeprecation, MetroApiClientOptions } from './client';
 export * from './types';
 
 /**

@@ -132,7 +132,75 @@ function deserialiseHistoryEntry(entry: any, deserialiseStatus: (status: any) =>
     deserialiseStatus(entry.status);
 }
 
+// --- Deprecation ---
+
+/** Information about the deprecation of the version of the proxy's API which this client uses */
+export interface ApiDeprecation {
+    /** When the version was or will be deprecated, if the proxy said */
+    deprecatedAt?: Date;
+    /** When the version will stop working, if the proxy said */
+    sunset?: Date;
+    /** URL for more information about the deprecation, if the proxy provided one */
+    link?: string;
+}
+
+/**
+ * Default deprecation warning, which logs to the console.
+ * Can be overridden with `MetroApiClientOptions.onDeprecation`.
+ */
+function warnDeprecation(deprecation: ApiDeprecation) {
+    let message = 'The version of the Tyne and Wear Metro API proxy used by this client library ';
+    if (deprecation.deprecatedAt) {
+        message += `${deprecation.deprecatedAt > new Date() ? 'will be' : 'was'} deprecated on ${deprecation.deprecatedAt.toISOString()}`;
+    } else {
+        message += 'is deprecated';
+    }
+    if (deprecation.sunset) {
+        message += `, and ${deprecation.sunset > new Date() ? 'will stop' : 'stopped'} working on ${deprecation.sunset.toISOString()}`;
+    }
+    message += '. Please update the client library.';
+    if (deprecation.link) message += ` More information: ${deprecation.link}`;
+    console.warn(message);
+}
+
+/**
+ * Finds the URL of the link with the `deprecation` relation (RFC 9745) in a `Link` header (RFC 8288), if there is one
+ * @param linkHeader The `Link` header
+ * @param baseUrl The URL of the response, which relative URLs are resolved against
+ */
+function findDeprecationLink(linkHeader: string, baseUrl: string): string | undefined {
+    // Each link is a URL in angle brackets, followed by `;`-separated parameters whose values may be quoted.
+    // Links are separated by commas, but URLs and quoted values can also contain commas, so it can't just be split.
+    const links = linkHeader.matchAll(/<([^>]*)>((?:\s*;\s*[^;,=\s]+\s*(?:=\s*(?:"(?:[^"\\]|\\.)*"|[^;,]*))?)*)/g);
+    for (const [, url, params] of links) {
+        // Only the first `rel` parameter counts
+        const rel = [...params.matchAll(/;\s*([^;,=\s]+)\s*(?:=\s*(?:"((?:[^"\\]|\\.)*)"|([^;,]*)))?/g)]
+            .find(([, name]) => name.toLowerCase() === 'rel');
+        // `rel` can be a space-separated list of relations
+        const relations = (rel?.[2] ?? rel?.[3])?.trim().toLowerCase().split(/\s+/);
+        if (!relations?.includes('deprecation')) continue;
+        try {
+            return new URL(url, baseUrl).href;
+        } catch {
+            return url;
+        }
+    }
+}
+
 // --- Client ---
+
+/** The prefix for the version of the proxy's API which this client was built for. */
+const API_VERSION_PREFIX = '/v1';
+
+export interface MetroApiClientOptions {
+    /**
+     * Called once, the first time the proxy says that the version of its API which this client was built for
+     *  is deprecated, meaning this client library needs to be updated.
+     * By default, this logs a warning.
+     * Errors thrown by this (or promises it returns being rejected) are logged, rather than failing the request.
+     */
+    onDeprecation?: (deprecation: ApiDeprecation) => void | Promise<void>;
+}
 
 /** An error response from the proxy. */
 export class MetroApiError extends Error {
@@ -150,17 +218,65 @@ export class MetroApiError extends Error {
  * A client for the unofficial Tyne and Wear Metro API proxy
  */
 export class MetroApiClient {
-    constructor(private readonly baseUrl: string) {
-        this.baseUrl = baseUrl.replace(/\/$/, '');
+    /** The URL of the version of the proxy's API which this client uses */
+    private readonly apiUrl: string;
+    private deprecationReported = false;
+
+    /**
+     * @param baseUrl URL of the proxy, without an API version (e.g. `https://example.com/api`, not `.../api/v1`)
+     * @param opts Options
+     */
+    constructor(baseUrl: string, private readonly opts: MetroApiClientOptions = {}) {
+        this.apiUrl = baseUrl.replace(/\/$/, '') + API_VERSION_PREFIX;
+    }
+
+    /** Reports if a response says that this client's API version is deprecated, unless it already has been */
+    private checkDeprecation(response: Response): void {
+        if (this.deprecationReported) return;
+
+        // RFC 9745
+        const deprecationHeader = response.headers.get('Deprecation');
+        if (!deprecationHeader) return;
+
+        const deprecation: ApiDeprecation = {};
+
+        // This is a Structured Field date, which is `@` followed by seconds since the epoch
+        const deprecatedAt = deprecationHeader.match(/^@(-?\d+)$/);
+        if (deprecatedAt) deprecation.deprecatedAt = new Date(+deprecatedAt[1] * 1000);
+
+        const linkHeader = response.headers.get('Link');
+        if (linkHeader) {
+            const link = findDeprecationLink(linkHeader, response.url);
+            if (link) deprecation.link = link;
+        }
+
+        // RFC 8594
+        const sunsetHeader = response.headers.get('Sunset');
+        if (sunsetHeader) {
+            const sunsetDate = new Date(sunsetHeader);
+            if (!isNaN(sunsetDate.getTime())) deprecation.sunset = sunsetDate;
+        }
+
+        this.deprecationReported = true;
+        // Errors are only logged, so that failing to report the deprecation doesn't make the request fail
+        const logError = (error: unknown) =>
+            console.error('Error while reporting that the API version is deprecated:', error);
+        try {
+            const result = (this.opts.onDeprecation ?? warnDeprecation)(deprecation);
+            if (result instanceof Promise) result.catch(logError);
+        } catch (error) {
+            logError(error);
+        }
     }
 
     /** Fetches from the proxy, throwing a `MetroApiError` if it responds with an HTTP error */
     private async request(method: string, path: string, queryParams?: URLSearchParams, body?: unknown): Promise<any> {
-        const response = await fetch(`${this.baseUrl}${path}${queryParams?.size ? `?${queryParams}` : ''}`, {
+        const response = await fetch(`${this.apiUrl}${path}${queryParams?.size ? `?${queryParams}` : ''}`, {
             method,
             headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
             body: body === undefined ? undefined : JSON.stringify(body),
         });
+        this.checkDeprecation(response);
         if (!response.ok) throw new MetroApiError(response.status, await response.text());
         if (response.status === 204) return;
         return response.json();
@@ -511,7 +627,13 @@ export class MetroApiClient {
         }
 
         const eventSource = createEventSource({
-            url: `${this.baseUrl}/subscriptions/${encodeURIComponent(token)}/stream?${queryParams}`,
+            url: `${this.apiUrl}/subscriptions/${encodeURIComponent(token)}/stream?${queryParams}`,
+            // Wrapped so that the stream's response headers can also be checked for deprecation
+            fetch: async (url, init) => {
+                const response = await fetch(url, init);
+                this.checkDeprecation(response);
+                return response;
+            },
             onConnect: callbacks.onConnect,
             onDisconnect: callbacks.onDisconnect,
             onScheduleReconnect: callbacks.onScheduleReconnect,

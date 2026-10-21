@@ -1,16 +1,19 @@
-{
+﻿{
   "compilerOptions": {
     "target": "es2020",
-    "module": "esnext",
-    "moduleResolution": "node",
-    "esModuleInterop": true,
+    "module": "preserve",
+    "moduleDetection": "force",
+    "moduleResolution": "bundler",
+    "verbatimModuleSyntax": true,
+    "lib": ["es2020", "dom"],
+    // The library must be browser-compatible
+    "types": [],
+
     "strict": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "outDir": "./dist",
-    "declaration": true,
-    "sourceMap": true,
-    "lib": ["es2020", "dom"]
+
+    // tsdown does the building, so this is only for type-checking
+    "noEmit": true,
+    "skipLibCheck": true
   },
   "include": ["src/**/*"]
 }

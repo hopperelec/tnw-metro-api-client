@@ -5,6 +5,8 @@ A client library for my [Tyne and Wear Metro API proxy and data aggregator](http
 ## Installation
 
 ```bash
+bun add tnw-metro-api-client
+# or
 npm install tnw-metro-api-client
 # or
 yarn add tnw-metro-api-client

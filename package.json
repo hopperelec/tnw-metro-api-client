@@ -18,8 +18,9 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format cjs,esm --dts --clean",
-    "prepublishOnly": "pnpm run build"
+    "build": "tsdown",
+    "typecheck": "tsc",
+    "prepublishOnly": "bun run build"
   },
   "keywords": [
     "tyne and wear",
@@ -41,7 +42,7 @@
     "url": "https://github.com/hopperelec/tnw-metro-api-client/issues"
   },
   "devDependencies": {
-    "tsup": "^8.4.0",
+    "tsdown": "^0.23.1",
     "typescript": "^5.8.3"
   },
   "dependencies": {
